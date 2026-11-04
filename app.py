@@ -20,6 +20,7 @@ st.set_page_config(
 COLORS = {
     "Số điện thoại": ("#112B49", "#60B7FF"),
     "Số tài khoản": ("#332911", "#F5C451"),
+    "Đường dẫn / URL": ("#351C31", "#FF8FCB"),
     "Ngân hàng": ("#10352F", "#51D7BA"),
     "Cơ quan công an": ("#351C31", "#F28BCC"),
     "Nhà mạng": ("#282149", "#B7A2FF"),
@@ -193,12 +194,13 @@ with input_tab:
         st.markdown('<div class="result-card">' + render_highlight(text, result["entities"]) + '</div>', unsafe_allow_html=True)
 
         counts = {name: sum(1 for item in result["entities"] if item["category"] == name) for name in COLORS}
-        cols = st.columns(5)
+        cols = st.columns(6)
         cols[0].metric("Dấu hiệu rủi ro", len(result["signals"]))
         cols[1].metric("Số điện thoại", counts["Số điện thoại"])
         cols[2].metric("Số tài khoản", counts["Số tài khoản"])
-        cols[3].metric("Ngân hàng", counts["Ngân hàng"])
-        cols[4].metric("Cơ quan / nhà mạng", counts["Cơ quan công an"] + counts["Nhà mạng"])
+        cols[3].metric("URL / đường dẫn", counts["Đường dẫn / URL"])
+        cols[4].metric("Ngân hàng", counts["Ngân hàng"])
+        cols[5].metric("Cơ quan / nhà mạng", counts["Cơ quan công an"] + counts["Nhà mạng"])
 
         st.markdown('<div class="section-title">Vì sao cần chú ý?</div><div class="section-subtitle">Các quy tắc đã khớp với nội dung tin nhắn.</div>', unsafe_allow_html=True)
         if result["signals"]:
@@ -212,7 +214,7 @@ with input_tab:
             rows = [{"Thông tin gốc": e["text"], "Loại": e["category"], "Độ tin cậy quy tắc": e["score"], "Vị trí ký tự": f'{e["start"]}–{e["end"]}'} for e in result["entities"]]
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
         else:
-            st.info("Không tìm thấy số điện thoại, số tài khoản hoặc tổ chức trong danh sách nhận diện.")
+            st.info("Không tìm thấy URL, số điện thoại, số tài khoản hoặc tổ chức trong danh sách nhận diện.")
         best_match = matches[0] if matches else {}
         report = [{"Mức cảnh báo": level, "Điểm sàng lọc": result["score"], "Tình huống gần nhất": best_match.get("title", ""), "Nhãn tình huống gần nhất": best_match.get("label", ""), "Điểm tương đồng (không phải xác suất)": round(best_match.get("similarity", 0) * 100, 1), "Phương pháp đối chiếu": comparison.get("method", ""), "Dấu hiệu": "; ".join(result["signals"]), "Thông tin trích xuất": "; ".join(e["text"] for e in result["entities"])}]
         st.download_button("Tải báo cáo (.csv)", pd.DataFrame(report).to_csv(index=False).encode("utf-8-sig"), "bao_cao_tin_nhan.csv", "text/csv")
@@ -243,6 +245,7 @@ with batch_tab:
                             "Tin nhắn": text, "Mức cảnh báo": result["level"], "Điểm": result["score"],
                             "Số điện thoại": "; ".join(grouped["Số điện thoại"]),
                             "Số tài khoản": "; ".join(grouped["Số tài khoản"]),
+                            "URL / đường dẫn": "; ".join(grouped["Đường dẫn / URL"]),
                             "Tổ chức": "; ".join(grouped["Ngân hàng"] + grouped["Cơ quan công an"] + grouped["Nhà mạng"]),
                             "Dấu hiệu": "; ".join(result["signals"]),
                             "Vị trí thực thể": "; ".join(f'{e["category"]}={e["start"]}:{e["end"]}' for e in result["entities"]),
@@ -264,12 +267,12 @@ with about_tab:
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("#### 01 · Trích xuất thông tin")
-        st.write("Tìm số điện thoại, số tài khoản trong ngữ cảnh giao dịch và tên ngân hàng, cơ quan công an, nhà mạng. Kết quả giữ nguyên nội dung gốc và vị trí để bạn đối chiếu.")
+        st.write("Tìm URL, số điện thoại, số tài khoản trong ngữ cảnh giao dịch và tên ngân hàng, cơ quan công an, nhà mạng. Kết quả giữ nguyên nội dung gốc và vị trí để bạn đối chiếu.")
         st.markdown("#### 02 · Dò dấu hiệu rủi ro")
-        st.write("Kiểm tra yêu cầu OTP/mật khẩu, chuyển tiền, thúc giục, đe dọa, liên kết, cài ứng dụng và yêu cầu giữ bí mật.")
+        st.write("Kiểm tra yêu cầu OTP/mật khẩu, chuyển tiền, thúc giục, đe dọa, liên kết, cài ứng dụng và yêu cầu giữ bí mật. Với URL, hệ thống xem xét tên miền IP, tên miền rút gọn, punycode, đuôi miền đáng ngờ, từ khóa đăng nhập/xác minh và dấu hiệu ghép tên tổ chức.")
     with c2:
         st.markdown("#### 03 · Tạo mức cảnh báo")
-        st.write("Điểm được tính theo số quy tắc khớp. Đây là điểm sàng lọc, không phải xác suất tin nhắn lừa đảo.")
+        st.write("Điểm kết hợp số dấu hiệu và mức đáng ngờ của URL cao nhất trong tin nhắn. Đây là điểm sàng lọc, không phải xác suất tin nhắn lừa đảo; có URL không đồng nghĩa với lừa đảo.")
         st.markdown("#### Giới hạn cần biết")
         st.write("Danh sách tổ chức và biến thể chữ có giới hạn; cách viết mới hoặc bị làm nhiễu mạnh có thể bị bỏ sót. Luôn xác minh qua ứng dụng, website hoặc tổng đài chính thức.")
     st.info("Không nhập thông tin cá nhân thật nếu không cần thiết. Không cung cấp OTP, bấm liên kết hay gọi số điện thoại được gửi trong tin nhắn đáng ngờ.")

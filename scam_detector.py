@@ -6,6 +6,7 @@ original-text offsets so the UI can highlight precisely what was found.
 
 import re
 import unicodedata
+from urllib.parse import unquote, urlsplit
 
 from scenario_matcher import compare_to_scenarios
 
@@ -46,7 +47,7 @@ SUSPICIOUS_PATTERNS = [
     ("Yêu cầu chuyển tiền, chuyển khoản hoặc nộp phí", r"(?:chuyển\s*(?:tiền|khoản)|nộp\s*phí|đóng\s*phí|thanh\s*toán|nạp\s*tiền)"),
     ("Thúc giục thực hiện ngay hoặc trong thời hạn ngắn", r"(?:ngay|gấp|khẩn|trong\s*hôm\s*nay|trong\s*\d+\s*(?:phút|giờ|ngày))"),
     ("Dọa khóa tài khoản, thuê bao hoặc phát sinh hậu quả pháp lý", r"(?:(?:khóa|khoá|tạm\s*ngưng|phong\s*tỏa|xử\s*lý|khởi\s*tố).{0,70}(?:tài\s*khoản|thuê\s*bao|hồ\s*sơ|vi\s*phạm)|(?:tài\s*khoản|thuê\s*bao|hồ\s*sơ).{0,70}(?:khóa|khoá|tạm\s*ngưng|phong\s*tỏa|xử\s*lý|khởi\s*tố))"),
-    ("Có đường dẫn cần kiểm tra trước khi truy cập", r"(?:https?://|www\.)\S+|\b(?:bấm|nhấn|truy\s*cập)\s+(?:vào\s+)?link\b"),
+    ("Có đường dẫn cần kiểm tra trước khi truy cập", r"(?:https?\s*[:：]\s*//|hxxps?\s*[:：]\s*//|www\s*[.．]|\b[a-z0-9-]+\s*[.．](?:com|net|org|vn|io|app|info|biz|xyz|top|click|site|online|shop|live|icu|work|zip|mov|example)\b)|\b(?:bấm|nhấn|truy\s*cập)\s+(?:vào\s+)?link\b"),
     ("Yêu cầu cài ứng dụng hoặc tệp không rõ nguồn gốc", r"(?:cài\s*(?:đặt\s*)?(?:app|ứng\s*dụng|apk)|tải\s*(?:app|ứng\s*dụng|apk))"),
     ("Tự xưng là cơ quan hoặc tổ chức để yêu cầu xử lý", r"(?:chúng\s*tôi\s*là|đây\s*là|nhân\s*viên|cán\s*bộ|tôi\s*là).{0,60}(?:công\s*an|ngân\s*hàng|viettel|vinaphone|mobifone|bidv|vietcombank)"),
     ("Cô lập người nhận, yêu cầu giữ bí mật", r"(?:không\s*kể|không\s*nói|giữ\s*bí\s*mật|không\s*được\s*cho\s*ai\s*biết).{0,50}(?:người\s*khác|ai|sự\s*việc|quá\s*trình)?"),
@@ -58,6 +59,113 @@ _WORD_DIGITS = {
     "lăm": "5", "sáu": "6", "bảy": "7", "tám": "8", "chín": "9",
 }
 _PHONE_WORD_RE = re.compile(r"\b(?:không|linh|lẻ|một|mốt|hai|ba|bốn|tư|năm|lăm|sáu|bảy|tám|chín)(?:[\s,.;-]+(?:không|linh|lẻ|một|mốt|hai|ba|bốn|tư|năm|lăm|sáu|bảy|tám|chín)){8,11}\b", re.I)
+
+_URL_RE = re.compile(
+    r"(?ix)(?:"
+    r"(?:https?|hxxps?)\s*[:：]\s*//[^\s<>\"'`]+"
+    r"|www\s*[.．][^\s<>\"'`]+"
+    r"|(?:[a-z0-9-]+\s*(?:[.．]|\[\.\]|\[dot\]|\(dot\))\s*)+(?:com|net|org|vn|io|app|info|biz|xyz|top|click|site|online|shop|live|icu|work|zip|mov|example)(?:\b[^\s<>\"'`]*)?"
+    r")"
+)
+_SUSPICIOUS_TLDS = {"xyz", "top", "click", "icu", "shop", "live", "site", "online", "vip", "work", "zip", "mov", "buzz", "monster"}
+_SHORTENERS = {"bit.ly", "tinyurl.com", "t.co", "is.gd", "cutt.ly", "rb.gy", "shorturl.at", "rebrand.ly", "bl.ink", "lnkd.in"}
+_BRAND_TOKENS = (
+    "vietcombank", "vietinbank", "bidv", "agribank", "techcombank", "mbbank", "acb",
+    "vpbank", "tpbank", "sacombank", "vib", "shb", "hdbank", "eximbank", "seabank",
+    "ocb", "msb", "viettel", "vinaphone", "mobifone", "congan", "bocongan",
+)
+_URL_PATH_RISK_RE = re.compile(r"(?:login|log-in|signin|sign-in|dang[-_]?nhap|xac[-_]?minh|verify|verification|otp|unlock|account|nap[-_]?tien|thanh[-_]?toan|payment|refund|hoan[-_]?tien|nhan[-_]?qua|qua[-_]?tang|cap[-_]?nhat|update|banking|apk|download)", re.I)
+
+
+def _extract_urls(text):
+    """Find explicit links and bare domains, preserving their original spans."""
+    results = []
+    for match in _URL_RE.finditer(text):
+        start, end = match.span()
+        while end > start and text[end - 1] in ".,!?;:)]}\"'":
+            end -= 1
+        if end <= start:
+            continue
+        results.append(_match(text, start, end, "URL", "Đường dẫn / URL", .95))
+    return results
+
+
+def _url_risk_reasons(url):
+    """Return explainable red flags and a bounded additional score for one URL."""
+    normalized = url.strip().replace("．", ".").replace("。", ".")
+    normalized = re.sub(r"\s*(?:\[\.\]|\[dot\]|\(dot\))\s*", ".", normalized, flags=re.I)
+    normalized = re.sub(r"\s*\.\s*", ".", normalized)
+    normalized = re.sub(r"\s*:\s*//\s*", "://", normalized)
+    normalized = re.sub(r"^hxxps?://", "https://", normalized, flags=re.I)
+    if normalized.lower().startswith("www."):
+        normalized = "http://" + normalized
+    elif not re.match(r"^[a-z][a-z0-9+.-]*://", normalized, re.I):
+        normalized = "http://" + normalized
+    try:
+        parsed = urlsplit(normalized)
+        host = (parsed.hostname or "").lower().rstrip(".")
+    except ValueError:
+        parsed, host = None, ""
+
+    reasons = []
+    points = 0
+    if not host:
+        return reasons, points
+    try:
+        ascii_host = host.encode("idna").decode("ascii")
+    except UnicodeError:
+        ascii_host = host
+    labels = ascii_host.split(".")
+    tld = labels[-1] if labels else ""
+
+    try:
+        is_ip = bool(re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", host))
+    except Exception:
+        is_ip = False
+    if is_ip:
+        reasons.append("URL dùng địa chỉ IP thay cho tên miền")
+        points += 24
+    if "xn--" in ascii_host:
+        reasons.append("Tên miền mã hóa punycode, có thể che ký tự giả mạo")
+        points += 24
+    if ascii_host in _SHORTENERS:
+        reasons.append("URL rút gọn che khuất địa chỉ đích")
+        points += 18
+    if tld in _SUSPICIOUS_TLDS:
+        reasons.append(f"Tên miền dùng đuôi .{tld} thường cần kiểm tra kỹ")
+        points += 12
+    if parsed and parsed.username is not None:
+        reasons.append("URL chứa thông tin trước ký tự @ dễ làm giả địa chỉ hiển thị")
+        points += 24
+    try:
+        port = parsed.port if parsed else None
+    except ValueError:
+        port = -1
+    if port not in (None, 80, 443, -1):
+        reasons.append("URL dùng cổng mạng khác thường")
+        points += 10
+
+    decoded_path = unquote((parsed.path or "") + "?" + (parsed.query or "")) if parsed else ""
+    if _URL_PATH_RISK_RE.search(decoded_path):
+        reasons.append("Đường dẫn có từ khóa đăng nhập, xác minh, thanh toán hoặc tải ứng dụng")
+        points += 12
+
+    host_labels = labels[:-1]
+    multi_label_suffixes = {"com.vn", "net.vn", "org.vn", "gov.vn", "edu.vn", "co.uk", "com.au"}
+    suffix = ".".join(labels[-2:]) if len(labels) >= 2 else ""
+    registrable_label = labels[-3] if suffix in multi_label_suffixes and len(labels) >= 3 else (labels[-2] if len(labels) >= 2 else "")
+    suspicious_brand = False
+    for brand in _BRAND_TOKENS:
+        if brand in ascii_host:
+            # Require the brand to be the registrable domain label. A brand
+            # appearing only in a subdomain (brand.attacker.example) is risky.
+            if registrable_label != brand:
+                suspicious_brand = True
+                break
+    if suspicious_brand:
+        reasons.append("Tên miền ghép tên ngân hàng/cơ quan/nhà mạng với từ khác, có dấu hiệu giả mạo")
+        points += 22
+    return reasons, min(points, 45)
 
 
 def _match(text, start, end, label, category, score=1.0):
@@ -155,7 +263,8 @@ def analyze_message(text):
                 "scenario_comparison": {"matches": [], "method": "Chưa phân tích", "semantic_available": False}}
 
     phones = _extract_phones(text)
-    entities = phones + _account_matches(text, [(x["start"], x["end"]) for x in phones]) + _institution_matches(text)
+    urls = _extract_urls(text)
+    entities = urls + phones + _account_matches(text, [(x["start"], x["end"]) for x in phones]) + _institution_matches(text)
     # Keep the longest match in overlapping spans; category priority makes
     # account/phone detections win over generic organization fragments.
     priority = {"Số điện thoại": 0, "Số tài khoản": 1, "Ngân hàng": 2, "Cơ quan công an": 2, "Nhà mạng": 2}
@@ -169,13 +278,25 @@ def analyze_message(text):
     deduped.sort(key=lambda x: (x["start"], x["end"]))
 
     signals = [title for title, pattern in SUSPICIOUS_PATTERNS if re.search(pattern, text, re.I | re.U)]
+    if urls and "Có đường dẫn cần kiểm tra trước khi truy cập" not in signals:
+        signals.append("Có đường dẫn cần kiểm tra trước khi truy cập")
     if signals and any(x["label"] == "ORG" for x in deduped):
         signals.append("Tin nhắn nhắc đến tổ chức cùng dấu hiệu đáng ngờ; hãy xác minh qua kênh chính thức")
+
+    url_points = 0
+    for entity in urls:
+        reasons, points = _url_risk_reasons(entity["text"])
+        url_points = max(url_points, points)
+        for reason in reasons:
+            if reason not in signals:
+                signals.append(reason)
 
     sensitive = bool(re.search(r"\b(?:otp|mã\s*xác\s*thực|mật\s*khẩu|mã\s*pin|cvv)\b", text, re.I))
     money = bool(re.search(r"(?:chuyển\s*(?:tiền|khoản)|nộp\s*phí|đóng\s*phí|thanh\s*toán)", text, re.I))
     urgent = bool(re.search(r"(?:khẩn|ngay|gấp|khóa|khoá|phong\s*tỏa|khởi\s*tố)", text, re.I))
-    score = min(100, len(signals) * 15 + (30 if sensitive else 0) + (15 if money else 0) + (10 if urgent else 0))
+    url_prefixes = ("URL dùng", "Tên miền", "URL rút gọn", "URL chứa", "Đường dẫn có từ khóa")
+    base_signals = sum(1 for signal in signals if not signal.startswith(url_prefixes))
+    score = min(100, base_signals * 15 + url_points + (30 if sensitive else 0) + (15 if money else 0) + (10 if urgent else 0))
     level = "Cao" if sensitive or score >= 60 else "Cần thận trọng" if score >= 30 else "Chưa thấy dấu hiệu rõ"
     comparison = compare_to_scenarios(text)
     return {"entities": deduped, "signals": signals, "level": level, "score": score,
